@@ -1,10 +1,9 @@
 ﻿// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Threading;
 using System.Threading.Tasks;
+using AsyncKeyedLock;
 using Microsoft.Extensions.Logging;
 using Microsoft.Identity.Abstractions;
 
@@ -16,7 +15,11 @@ namespace Microsoft.Identity.Web
     public class DefaultCredentialsLoader : ICredentialsLoader
     {
         ILogger<DefaultCredentialsLoader>? _logger;
-        private readonly ConcurrentDictionary<string, SemaphoreSlim> _loadingSemaphores = new ConcurrentDictionary<string, SemaphoreSlim>();
+        private readonly AsyncKeyedLocker<string> _loadingSemaphores = new(o =>
+        {
+            o.PoolSize = 20;
+            o.PoolInitialFill = 1;
+        });
 
         /// <summary>
         /// Constructor with a logger
@@ -58,25 +61,15 @@ namespace Microsoft.Identity.Web
 
             if (credentialDescription.CachedValue == null)
             {
-                // Get or create a semaphore for this credentialDescription
-                var semaphore = _loadingSemaphores.GetOrAdd(credentialDescription.Id, (v) => new SemaphoreSlim(1));
-
-                // Wait to acquire the semaphore
-                await semaphore.WaitAsync();
-
-                try
+                // Get or create a semaphore for this credentialDescription and wait on it
+                using (await _loadingSemaphores.LockAsync(credentialDescription.Id))
                 {
                     if (credentialDescription.CachedValue == null)
                     {
                         if (CredentialSourceLoaders.TryGetValue(credentialDescription.SourceType, out ICredentialSourceLoader? loader))
                             await loader.LoadIfNeededAsync(credentialDescription, parameters);
                     }
-                }
-                finally
-                {
-                    // Release the semaphore
-                    semaphore.Release();
-                }
+                };
             }
         }
 
